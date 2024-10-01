@@ -1,0 +1,202 @@
+import pandas as pd
+import numpy as np
+import openpyxl
+import os
+import requests
+!pip install tabula-py
+import tabula.io as tabula
+from tabula.io import read_pdf
+from difflib import SequenceMatcher
+
+# # Set the JAVA_HOME environment variable to the Java installation directory
+# os.environ["JAVA_HOME"] = r"C:\VENV\jdk1.8.0_361\jre\bin\server"
+# url do arquivo
+url = 'http://antigo.sefa.pa.gov.br/legislacao/interna/portaria/ps2016_01726.pdf'
+response = requests.get(url)
+#abrir arquivo pdf com o tabula
+with open('ps2017_00276.pdf', 'wb') as pdf_file:
+    pdf_file.write(response.content)
+# definir as colunas do e a forma de leitura do pdf e salvar em uma variável
+tabelas = tabula.read_pdf('ps2017_00276.pdf',lattice=True, output_format='dataframe', pages='all',pandas_options={'names': ['FABRICANTE', 'MARCA/DESCRIÇÃO','EMBALAGEM', 'MATERIAL', 'RETORNÁVEL/DESCARTÁVEL', 'VOLUME (ML)','GTIN/EAN','PREÇO','EFEITOS A PARTIR DE:', 'nan1', 'nan2', 'nan3']})
+
+# criar uma variável e a lista para armazenar os resultados
+i = tabelas[0]
+list_final = []
+# fazer a verificação por linha usando itertuples
+for row in i.itertuples():
+    row = list(row)[1:]
+    row_clean = []
+    # retirar os NaN usando isnull e salvando as linhas já limpas em row_clean e depois passando para a list_final que foi criada no inicio
+    for item in row:
+        if not pd.isnull(item):
+            row_clean.append(item)
+    list_final.append(row_clean)
+# criando um dataframe com a list_final, criando as colunas, e retirando o novo index do dataframe, por fim tirando as linhas de observaçao no pdf e salvando o resultado
+results = pd.DataFrame(list_final)
+results.columns = results.iloc[0]
+results.drop(results.index[0], inplace = True)
+results.dropna(thresh=1,inplace = True)
+results.dropna(inplace=True)
+results.reset_index(drop=True,inplace = True)
+results = results.replace('\r', ' ', regex=True)
+results = results[results['FABRICANTE'] != 'OUTROS']
+results = results[results['FABRICANTE'] != 'FABRICANTE']
+results.to_excel('portaria_pmpf_refrigerante.xlsx')
+
+#abrir os dados do catálogo e filtrar apenas refrigerante
+catlg = pd.read_excel('Catalogo GTIN - 12212023.xlsx')
+catlg = catlg[catlg['TIPO'] != 'CERVEJA']
+
+#calcular a similaridade de cada palavra importada direto do pdf da portaria
+def calcular_similaridade_palavra_alvo(palavra_alvo, lista_palavras):
+    resultados = []
+    for outra_palavra in lista_palavras:
+        # Criar um objeto SequenceMatcher
+        seq_matcher = SequenceMatcher(None, palavra_alvo, outra_palavra)
+        # Obter a similaridade normalizada
+        similaridade = seq_matcher.ratio() * 100
+        # Salvar os resultados na lista
+        resultados.append({
+            "catalogo": palavra_alvo,
+            "portaria": outra_palavra,
+            "similaridade": similaridade})
+    return resultados
+
+# Lista para armazenar os resultados
+lista_df = []
+# Iterar sobre as palavras únicas na coluna 'MARCA/DESCRIÇÃO PORTARIA' de catlg
+for palavra_alvo in catlg['MARCA/DESCRIÇÃO PORTARIA'].unique():
+    # Calcular a similaridade entre a palavra alvo e as palavras únicas em 'MARCA / DESCRIÇÃO' de results
+    word_data = calcular_similaridade_palavra_alvo(palavra_alvo, results['MARCA/\rDESCRIÇÃO'].unique())
+    # Adicionar os resultados à lista
+    lista_df.extend(word_data)
+
+# Criar um DataFrame a partir da lista de resultados
+i = pd.DataFrame(lista_df)
+
+#achar a maior nota de similaridade de cada produto da portaria comparados com o catálogo
+def maior_nota(i):
+    # Agrupa os dados pelo nome da portaria e catalogo e encontra a maior nota para cada grupo
+    resultado = i.groupby(['portaria', 'catalogo'])['similaridade'].max().reset_index()
+    # Encontrar a linha correspondente à maior nota para cada portaria
+    idx = resultado.groupby('portaria')['similaridade'].transform("max") == resultado['similaridade']
+    # Filtrar o resultado para incluir apenas as linhas correspondentes à maior nota para cada portaria
+    resultado_final = resultado[idx][['portaria', 'catalogo', 'similaridade']]
+    return resultado_final
+
+# Chama a função e armazena o resultado em uma variável chamada 'resultado'
+resultado = maior_nota(i)
+# Salvar o resultado no excel
+resultado.reset_index(drop=True,inplace = True)
+resultado.to_excel('comparação_final.xlsx')
+
+#concatenar o df da portaria e dos resultados de similaridade
+df_resultado = pd.merge(results, resultado, left_on='MARCA/\rDESCRIÇÃO', right_on='portaria', how='inner')
+
+df_resultado.replace(to_replace=
+                     {'DESCARTÁVEL': 'DESCARTAVEL', 'DESCARTÁVE': 'DESCARTAVEL', 'DESCRTÁVEL': 'DESCARTAVEL', 'RETORNÁVEL':'RETORNAVEL', 'ALUMÍNIO':'ALUMINIO','PLÁSTICO':'PLASTICO' , 'GARRAFA -': 'GARRAFA', 'Multipack': 'Multpack', ' 2 ':' 2', 'GARRAFA-': 'GARRAFA', '-Multpack':'Multpack', 'LATA-':'LATA'}
+                     ,regex=True, inplace=True)
+#concatenar os dados em coluna separada
+df_resultado['concatenado'] = df_resultado['catalogo'] + ' ' + df_resultado['VOLUME(M\rL)'] + 'ml ' + df_resultado['EMBALAGEM'] + ' ' + df_resultado['MATERIAL'] + ' ' + df_resultado['RETORNÁVEL /\rDESCARTÁVEL']
+
+#renomear colunas com nomes errados
+df_resultado.rename(columns={'GTIN/EAN': 'GTIN'}, inplace=True)
+df_resultado.rename(columns={'RETORNÁVEL /\rDESCARTÁVEL': 'RETORNAVEL/DESCARTAVEL'}, inplace=True)
+df_resultado.rename(columns={'VOLUME\r(ML)': 'VOLUME (ML)'}, inplace=True)
+df_resultado.rename(columns={'EFEITOS A PARTIR\rDE:': 'Vigência a partir de'}, inplace=True)
+df_resultado['PREÇO'] = df_resultado['PREÇO'].str.replace(',', '.')
+df_resultado['PREÇO'] = df_resultado['PREÇO'].astype(float)
+df_resultado['concatenado'] = df_resultado['concatenado'].astype(str)
+
+#comparar os dados concatenados da portaria e do catálogo
+# Cria uma função para verificar ambas as condições
+def verifica_condicoes(x):
+    return any(x == cat or "DESCARTAVEL/RETORNAVEL" in cat for cat in catlg['CONCATENAR GTIN'])
+
+# Aplica a função na coluna 'concatenado' usando apply
+df_resultado['procv'] = df_resultado['concatenado'].apply(verifica_condicoes)
+df_resultado.to_excel('concatenar.xlsx')
+
+### segunda parte ###
+
+a = pd.read_excel('duplicadas.xlsx')
+# Verifica se a coluna 'duplicadas' é verdadeira em 'results'
+linhas_verdadeiras = results[results['duplicadas']]
+# Itera sobre as linhas verdadeiras e compara com 'a'
+for linha, linha_result in linhas_verdadeiras.iterrows():
+    gtin_ean = linha_result['GTIN/EAN']
+    linha_a = a[a['GTIN/EAN'] == gtin_ean]
+
+    # Se houver uma correspondência, copia a informação da coluna 'flag'
+    if not linha_a.empty:
+        flag_a = linha_a.iloc['Flag fabricante']
+        results.at[linha, 'motivo_duplicadas'] = flag_a
+
+results.to_excel('refrigerante_final.xlsx')
+
+### terceira parte ###
+
+# Encontrar linhas duplicadas na coluna especificada
+duplicatas = catlg[catlg.duplicated(subset=['CONCATENAR GTIN'], keep=False)]
+
+# Se houver duplicatas, agrupar por valor e armazenar as linhas duplicadas tratadas em uma lista
+linhas_duplicadas_tratadas = []
+for valor, grupo in duplicatas.groupby('CONCATENAR GTIN'):
+    linhas_do_valor_filtradas = grupo[grupo['VÁLIDO']].values.tolist()
+    if linhas_do_valor_filtradas:
+        linhas_duplicadas_tratadas.append(linhas_do_valor_filtradas)
+
+# Identificar linhas não duplicadas
+linhas_nao_duplicadas = catlg[~catlg.duplicated(subset=['CONCATENAR GTIN'], keep=False)]
+
+# Juntar as linhas duplicadas tratadas e as linhas não duplicadas
+resultado_final = linhas_duplicadas_tratadas + [linhas_nao_duplicadas.values.tolist()]
+
+df_duplicadas_tratadas = pd.DataFrame([item for sublist in linhas_duplicadas_tratadas for item in sublist], columns=catlg.columns)
+df_nao_duplicadas = pd.DataFrame(linhas_nao_duplicadas, columns=catlg.columns)
+
+# Juntar os dois DataFrames
+catlg = pd.concat([df_duplicadas_tratadas, df_nao_duplicadas])
+
+valores_unicos = catlg.drop_duplicates()
+
+cat = [valores_unicos]
+por = [df_resultado]
+
+# Lista para armazenar as linhas modificadas
+lista = []
+# Iterar sobre as linhas do DataFrame
+for index, row in valores_unicos.iterrows():
+    if 'DESCARTAVEL/RETORNAVEL' in row['CONCATENAR GTIN']:
+        # Dividir a linha em duas
+        descartavel = row['CONCATENAR GTIN'].replace('DESCARTAVEL/RETORNAVEL', 'DESCARTAVEL')
+        retornavel = row['CONCATENAR GTIN'].replace('DESCARTAVEL/RETORNAVEL', 'RETORNAVEL')
+
+        # Criar duas novas linhas
+        linha_descartavel = {'GTIN': row['GTIN'], 'CONCATENAR GTIN': descartavel, 'Preço portaria': row['Preço portaria'], 'VÁLIDO': row['VÁLIDO'], 'Modificacao': 'Sim'}
+        linha_retornavel = {'GTIN': row['GTIN'], 'CONCATENAR GTIN': retornavel, 'Preço portaria': row['Preço portaria'], 'VÁLIDO': row['VÁLIDO'], 'Modificacao': 'Sim'}
+
+        # Armazenar as linhas modificadas na lista
+        lista.extend([linha_descartavel, linha_retornavel])
+    else:
+        # Se a linha não for anormal, manter como está
+        lista.append({'GTIN': row['GTIN'], 'CONCATENAR GTIN': row['CONCATENAR GTIN'], 'Preço portaria': row['Preço portaria'], 'VÁLIDO': row['VÁLIDO'], 'Modificacao': ' '})
+
+# Criar um DataFrame com as linhas modificadas
+df_modificado = pd.DataFrame(lista)
+df_modificado.to_excel('analise.xlsx')
+
+def verificar_precos(df_modificado, df_resultado):
+    # Cria um DataFrame combinando as informações relevantes com base em 'concatenado'
+    df_combinado = pd.merge(df_resultado[['PREÇO', 'concatenado', 'GTIN']], df_modificado[['Preço portaria', 'CONCATENAR GTIN', 'VÁLIDO','Modificacao']], left_on='concatenado', right_on='CONCATENAR GTIN', how='left', suffixes=('_resultado', '_catlg'))
+    # Verifica se a coluna 'Preço portaria' (do catálogo) está presente nos resultados, considerando 'concatenado' como guia
+    # Mantém as linhas com 'DESCARTAVEL/RETORNAVEL' na comparação
+    df_combinado['preço_na_resultado'] = (df_combinado['PREÇO'] == df_combinado['Preço portaria'])
+    # Retorna o DataFrame resultante
+    return df_combinado[['PREÇO', 'concatenado', 'GTIN', 'Preço portaria', 'CONCATENAR GTIN','VÁLIDO', 'Modificacao', 'preço_na_resultado']]
+
+# Chama a função e exibe o resultado
+resultado = verificar_precos(df_modificado, df_resultado)
+resultado = resultado.drop_duplicates()
+resultado.to_excel('preço.xlsx')
+print(resultado)
